@@ -1,0 +1,185 @@
+---
+title: "EVT Analysis"
+output:
+  html_notebook: default
+  pdf_document: default
+---
+#Preliminaries
+We want to analyze some financial data from the point of view of fitting some heavy-tailed distribution to it and analyzing consequences to risk management. First we load the required libraries
+
+```{r}
+library(evir)
+library(poweRlaw)
+library(quantmod)
+library(FinTS)
+```
+
+Next we download a bunch of data for technological stocks. We start our analysis from Apple
+```{r}
+tech<-getSymbols(c('AAPL','GOOGL','AMZN','TSLA','MSFT'),src="yahoo", from="2007-01-01")
+dates<-index(AAPL)
+aapl<-as.data.frame(AAPL)
+aapl<-cbind(date=dates,aapl)
+rownames(aapl)<-NULL
+head(aapl)
+```
+
+We obtain the log returns and from them the lossess and focus our further attention on them since lossess are really the things we should concentrate on
+```{r}
+returns_a<-Delt(aapl$AAPL.Adjusted,type = 'log')
+returns_a<-na.omit(returns_a)
+losses_a=-returns_a[returns_a<0]
+```
+
+
+There are two heavy-tailed distributions we will focus on in this mini-project: power law and lognormal. Power law distribution is the true "fat tail" which is capable of producing events of extreme magnitude, hence it is very important from the risk management point of view to correctly identify whether our data has it or not. 
+
+The PDF of the Pareto distribution (one of the particular examples of power-law probability distributions) is $f(x)=\frac{\alpha*x^\alpha_m}{x^\alpha+1}$ while CDF is $F(x)=1-(\frac{x_m}{x})^\alpha$
+We can see that there are two parameters: $x_m$ is the scale, minimum possible value and $\alpha$ is the shape parameter. One of the most distinctive characteristics of the Pareto distribution is that it has infinite moments of order $\ge \alpha$. This makes this distibution exceptionaly fat-tailed and the lower is parameter $\alpha$ the fatter is the tail. Another consequence is that when theoretical moment is infinite, sample moments become unreliable for inference.
+
+What about the log-normal distribution? It also rather commonly occurs when dealing with financial data, perhaps, even more commonly than power law. It has a PDF of $f(x)=\frac{exp(-\frac{(\log(x)-\mu)^2}{2*\sigma^2})}{x*\sigma*\sqrt(x)}$
+So, it also has two parameters, $\mu$ and $\sigma$. All moments of the log-normal distribution are always finite which makes a stark contrast from the Pareto. However, the log-normal distribution can produce very heavy tails as well which is mainly controlled by the $\sigma$ parameter - the higher it is the higher are the variance and kurtosis. It also sometimes becomes pretty hard to distinguish the power-law from the log-normal, especially from the log-normal with high $\sigma$. But we will try our best.
+
+Our next goal is to perform a bunch of graphical analysis in order to determine whether we have a power law in our data or not. We first analyze losses of Apple.
+
+#Graphical analysis
+The first plot is QQ-plot which compares the data with exponential distribution. If the resulting graph is concave, our underlying distribution has heavier tails than exponential, which we exactly see on the graph.
+```{r}
+evir::qplot(losses_a)
+```
+
+The next plot is the ZIPF plot which is basically the loglog plot of the empirical survival function of our data. For the power law distribution the resulting relationship is negative and linear with respect to x: 
+
+$$\overline{F(x)}=(\frac{x_m}{x})^\alpha =>\\
+\log(\overline{F(x)})=\alpha*\log(x_m)-\alpha*\log(x)$$
+
+
+```{r}
+emplot(losses_a,'xy',col='blue')
+```
+We don't have a linear relationship, maybe only in the very tail.
+
+The next plot is the plot of the mean excess function (MEF). For Pareto distribution the MEF is growing linearly in the threshold: $$e_{PA}(v)=\frac{v}{\alpha-1}$$
+```{r}
+meplot(losses_a,col='red')
+```
+Arguably, it doesn't resemble much a linear relationship.
+
+Next, we create the function which plots the MS (maximum-to-sum) plot for certain number of moments. It is known that power law distribution with parameter alpha has infinite moments of order higher than alpha. The MS plot helps to detect whether a moment of certain order is finite or not. If the plot converges to 0, the p'th moment is finite, whereas if the plot oscillates, the moment is infinite.
+```{r}
+MSplot<- function(data,p=5) {
+  par(mfrow=c(3,2))
+  x=abs(data)
+  for (i in 1:p) {
+    y=x^i
+    S=cumsum(y)
+    M=cummax(y)
+    R=M/S
+    plot(1:length(x),R,type='l',col='blue',lwd=3,ylim=c(0,1),xlab='n',ylab='Rn',main=paste("MSplot for p=",i))
+  }
+  par(mfrow=c(1,1))
+}
+MSplot(losses_a)
+```
+Based on these graphs, I would say that definetely 1st and 2nd moments are finite, and 3rd maybe as well, while higher order moments may be infinite. 
+
+We next utilize another library - poweRlaw. It allows fitting heavy tailed distributions to the data, in particular Pareto and log-normal. We fit both distributions to our data creating continuous power-law and log-normal objects.
+```{r}
+#fitting continuous power law
+a_pl<- conpl$new(losses_a) 
+est_a<-estimate_xmin(a_pl)
+a_pl$setXmin(est_a)
+
+#fitting continuous log-normal
+a_ln=conlnorm$new(losses_a)
+est2_a<-estimate_xmin(a_ln)
+a_ln$setXmin(est2_a)
+```
+
+Now let's plot the fits on the same graph.
+```{r}
+plot(a_pl,ylab='1-F(x)')
+lines(a_pl,col=4)
+lines(a_ln,col=2)
+title('Power-law and Log-normal fitted to Apple losses')
+legend('bottomleft',legend=c('Power-law','Log-normal'),pch=15,col = c('blue','red'))
+```
+We can see that log-normal distribution fits our data better. Let's conduct a formal statistical test to see it. We use a bootstrap with 1000 simulations and perform a Kolmogorov-Smirnov goodness-of-fit test (well, it's actually automatically performed by R for us)
+```{r}
+bs_ap=bootstrap_p(a_pl,no_of_sims = 1000,threads = 4)
+```
+We can extract KS goodness-of-fit statistic:
+```{r}
+bs_ap$gof
+```
+And the p-value:
+```{r}
+bs_ap$p
+```
+The p-value is very small indicating that we reject the null hypothesis of the test. This means that power law is **not** a valid distribution if we look at the data as a whole.
+But what if we split the data into the "bulk" and "tail" and try to conduct the same test? The reason is that real-world data often exhibits mixed behavior so although we cannot really detect the power law in the data as a whole, it may well be present in the tail. So we define the tail as being all observations higher than 95th quantile:
+```{r}
+loss_a_tail=losses_a[losses_a>quantile(losses_a,0.95)]
+```
+And conduct the same procedure with fitting and evaluating the power-law, but now on the tail:
+```{r}
+a_pl_t=conpl$new(loss_a_tail)
+est_a_t<-estimate_xmin(a_pl_t)
+a_pl_t$setXmin(est_a_t)
+bs_apt=bootstrap_p(a_pl_t,no_of_sims = 1000,threads = 4)
+```
+Extracting the statistic:
+```{r}
+bs_apt$gof
+```
+And the p-value:
+```{r}
+bs_apt$p
+```
+Now we have a very high p-value, meaning that we cannot rule out the power-law for the tail. Let's look at the estimated parameters of this distribution:
+```{r}
+a_pl_t$pars
+```
+The estimated value of the $\alpha$ is slightly less than 5. Let's plot the fit on the graph:
+```{r}
+plot(a_pl_t,ylab='1-F(x)')
+lines(a_pl_t,col=4)
+title('Power law fitted to the tail of Apple losses')
+```
+We see that now the relationship is much closer to linear which is the sign of a power law. However, this fit doesn't seem extremely good: we are unable to correctly detect the observation in the very tail. For the given probability (around 0.01) we estimate event of significantly lesser magnitude that actually happened (0.15 instead of 0.2). This may lead to a conclusion that $\alpha$ parameter should be a bit less than estimated value of 4.7.
+
+Let's produce a Hill plot - graph often used to infer the value of the $\alpha$. It shows the dependence of this parameter as a function of the threshold. The true value of the $\alpha$ corresponds to the point where the plot more or less "stabilizes".
+```{r}
+hill(loss_a_tail)
+```
+In our case I would say that it is happening around $\alpha \approx$ 3-3.5. These values correspond to approximate threshold of 0.056, so we fit the GPD with it.
+```{r}
+fit=gpd(loss_a_tail,threshold = 0.056)
+tail(fit)
+```
+Our $\xi$ parameter (which is the inverse of $\alpha$) is around 0.2975 which means that $\alpha \approx$ 3.36 which is in line with our initial guesses. The fit, however, is not extremely good as the value of $\xi$ parameter is not significant (at least on 90% level).
+
+Let us now plot the fitted object. "Evir" package offers 4 different plots: excess distribution, tail of underlying distribution, scatterplot of the residuals and QQplot of the residuals. We exploit all these.
+```{r}
+plot(fit)
+```
+The excess distribution seems to fit the data nicely.
+
+```{r}
+plot(fit)
+```
+The tail is also fitted nicely. Notice that now we are able to capture the observation in the very tail (corresponding to the loss of 0.2)
+
+```{r}
+plot(fit)
+```
+The residuals in the scatterplot seem to be pretty random and don't show any pattern which is a sign of a good fit.
+```{r}
+plot(fit)
+```
+Finally, the QQ-plot of the residuals addresses that they arepretty well fitted to the thin-tailed exponential distribution which means that we were able to explain much of the "fattness of the tail"
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
